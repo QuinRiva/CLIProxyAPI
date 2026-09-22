@@ -290,7 +290,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	); errHeaders != nil {
 		return resp, errHeaders
 	}
-	fastRequest := isAnthropicUpstreamBase(baseURL) && claudeRequestIsFast(httpReq, bodyForUpstream)
+	fastRequest := isAnthropicUpstreamBase(baseURL) && claudeRequestSpeedFast(bodyForUpstream)
 	authID, authLabel, authType, authValue := claudeAuthLogIdentity(auth)
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 		URL:       url,
@@ -339,6 +339,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		if errClose := errBody.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}
+		logClaudeFableOnlyRejection(ctx, auth, req.Model, httpResp.StatusCode, httpResp.Header)
 		if fastRequest {
 			return resp, newClaudeFastDirectResponseError(httpResp, b)
 		}

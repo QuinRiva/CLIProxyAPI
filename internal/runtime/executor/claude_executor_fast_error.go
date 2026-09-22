@@ -2,11 +2,16 @@ package executor
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
+
+	log "github.com/sirupsen/logrus"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -91,6 +96,11 @@ type claudeFastDirectResponseError struct {
 	response         *cliproxyexecutor.RequestTerminatedError
 	retryAfter       *time.Duration
 	credentialScoped bool
+	// modelScoped marks a rejection that belongs to the requested model on this
+	// credential alone: neither request-scoped (which would record no state and stop
+	// the credential loop) nor credential-scoped (which would bench a credential that
+	// still serves every other model).
+	modelScoped bool
 }
 
 func (e *claudeFastDirectResponseError) Error() string {
@@ -111,10 +121,7 @@ func (e *claudeFastDirectResponseError) IsRequestScoped() bool {
 	if e == nil {
 		return false
 	}
-	if e.credentialScoped {
-		return false
-	}
-	return true
+	return !e.credentialScoped && !e.modelScoped
 }
 
 func (e *claudeFastDirectResponseError) IsCredentialScoped() bool {
@@ -153,11 +160,16 @@ func newClaudeFastDirectResponseError(resp *http.Response, body []byte) error {
 	headers.Del("Content-Length")
 
 	var retryAfter *time.Duration
-	credentialScoped := false
+	credentialScoped, modelScoped := false, false
 	if resp.StatusCode == http.StatusTooManyRequests {
 		retryAfter = helps.ParseClaudeRateLimitResetForError(resp.Header, body, time.Now())
 		if helps.ClaudeHeadersIndicateUnifiedRateLimitRejection(resp.Header) {
 			credentialScoped = true
+		} else if !claudeBodyIndicatesFastModeCredits(body) && helps.ClaudeHeadersIndicateFableOnlyRateLimitRejection(resp.Header) {
+			// An exhausted Fable/overage allowance is a quota exhaustion on this one
+			// account, not the fast-mode entitlement refusal the request-scoped policy
+			// exists for: cool the requested model and let another pooled credential try.
+			modelScoped = true
 		}
 	}
 
@@ -169,15 +181,48 @@ func newClaudeFastDirectResponseError(resp *http.Response, body []byte) error {
 		},
 		retryAfter:       retryAfter,
 		credentialScoped: credentialScoped,
+		modelScoped:      modelScoped,
 	}
 }
 
-func claudeRequestIsFast(req *http.Request, body []byte) bool {
-	if req == nil {
-		return false
+// logClaudeFableOnlyRejection records a Fable/overage-only 429 against the credential that
+// returned it. The rejection cools one model on one account and nothing else, so without this
+// line an exhausted Fable allowance leaves nothing in the log but a bare 429 access entry.
+func logClaudeFableOnlyRejection(ctx context.Context, auth *cliproxyauth.Auth, model string, status int, headers http.Header) {
+	if status != http.StatusTooManyRequests || !helps.ClaudeHeadersIndicateFableOnlyRateLimitRejection(headers) {
+		return
 	}
-	betas := strings.Join(req.Header.Values("Anthropic-Beta"), ",")
-	return claudeRequestUsesFastMode(body, claudeRequestedBetas(betas, nil))
+	buckets := make([]string, 0, 2)
+	for _, window := range [...]string{"7d_oi", "Overage"} {
+		if helps.ClaudeUnifiedWindowStatus(headers, window) == "rejected" {
+			buckets = append(buckets, strings.ToLower(window))
+		}
+	}
+	id, label, _, _ := claudeAuthLogIdentity(auth)
+	fields := log.Fields{
+		"auth_id":          id,
+		"auth_label":       label,
+		"model":            model,
+		"rejected_buckets": strings.Join(buckets, ","),
+		"retry_after":      headers.Get("Retry-After"),
+		"reset":            claudeFableResetForLog(headers),
+	}
+	if auth != nil && auth.FileName != "" {
+		fields["auth_file"] = filepath.Base(auth.FileName)
+	}
+	helps.LogWithRequestID(ctx).WithFields(fields).Warn("claude 429: Fable/overage allowance exhausted on this credential; cooling this model and rotating credentials")
+}
+
+func claudeFableResetForLog(headers http.Header) string {
+	for _, name := range [...]string{"Anthropic-Ratelimit-Unified-7d_oi-Reset", "Anthropic-Ratelimit-Unified-Reset"} {
+		if raw := strings.TrimSpace(headers.Get(name)); raw != "" {
+			if epoch, errParse := strconv.ParseInt(raw, 10, 64); errParse == nil {
+				return time.Unix(epoch, 0).UTC().Format(time.RFC3339)
+			}
+			return raw
+		}
+	}
+	return ""
 }
 
 func claudeAuthLogIdentity(auth *cliproxyauth.Auth) (id, label, authType, authValue string) {
