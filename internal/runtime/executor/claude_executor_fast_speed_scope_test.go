@@ -80,6 +80,17 @@ func TestNewClaudeFastDirectResponseErrorScope(t *testing.T) {
 	sharedWindowHeaders := fableOnlyRejectionHeaders()
 	sharedWindowHeaders.Set("Anthropic-Ratelimit-Unified-5h-Status", "rejected")
 
+	// A 429 whose only overage signal is the persistent Overage-Disabled-Reason an account
+	// carries when it has never bought credits: nothing is rejected, so the rejection shape is
+	// unknown and must keep the stock Fast request-scoped policy.
+	disabledOverageHeaders := http.Header{
+		"Content-Type":                                        []string{"application/json"},
+		"Anthropic-Ratelimit-Unified-Status":                  []string{"allowed"},
+		"Anthropic-Ratelimit-Unified-5h-Status":               []string{"allowed"},
+		"Anthropic-Ratelimit-Unified-7d-Status":               []string{"allowed"},
+		"Anthropic-Ratelimit-Unified-Overage-Disabled-Reason": []string{"not_enrolled"},
+	}
+
 	testCases := []struct {
 		name             string
 		headers          http.Header
@@ -97,6 +108,12 @@ func TestNewClaudeFastDirectResponseErrorScope(t *testing.T) {
 			headers:          sharedWindowHeaders,
 			body:             fableOnlyRejectionBody,
 			credentialScoped: true,
+		},
+		{
+			name:          "disabled overage with nothing rejected is not a Fable rejection",
+			headers:       disabledOverageHeaders,
+			body:          fableOnlyRejectionBody,
+			requestScoped: true,
 		},
 		{
 			name:          "fast-mode entitlement refusal stays with the request",
@@ -304,6 +321,13 @@ func TestClaudeExecutorFableOnly429RotatesToHealthyCredential(t *testing.T) {
 		// The credential must not be benched as a whole: no credential_quota reason, and no
 		// cooldown anywhere near the 17058s (4h44m) reset Anthropic advertised for the Fable
 		// allowance. The aggregate deadline only mirrors the one cooled model's short backoff.
+		//
+		// That model cooldown is deliberately the generic exponential quota backoff
+		// (nextQuotaCooldown: 1s, 2s, 4s … capped at 30m), not the advertised Retry-After:
+		// ParseClaudeRateLimitReset drops the reset for an overage-only rejection on purpose
+		// (42d8e746, #5101), and the affinity reselect re-binds the session to the healthy
+		// credential, so a session pays the 429 once rather than once per turn. Re-probing every
+		// 30m is cheaper than over-benching the model if the overage bucket recovers early.
 		if updated.Quota.Reason == "credential_quota" {
 			t.Fatal("Fable-only rejection benched the whole credential")
 		}

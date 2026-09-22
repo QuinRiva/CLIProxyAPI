@@ -45,15 +45,21 @@ func ClaudeHeadersIndicateUnifiedRateLimitRejection(headers http.Header) bool {
 // Fable/overage allowance while the shared 5h and 7d subscription windows stayed allowed. It is
 // the positive counterpart of ClaudeHeadersIndicateUnifiedRateLimitRejection: a quota exhaustion
 // that belongs to the requested model on that one credential, which keeps serving every other
-// model. Both return false for a rejection whose shape is unknown.
+// model. Both return false for a rejection whose shape is unknown, so a 429 that merely carries
+// a persistent Overage-Disabled-Reason while nothing is rejected is not claimed by either.
 func ClaudeHeadersIndicateFableOnlyRateLimitRejection(headers http.Header) bool {
 	if headers == nil {
+		return false
+	}
+	status7dOI := ClaudeUnifiedWindowStatus(headers, "7d_oi")
+	unifiedStatus := strings.ToLower(strings.TrimSpace(getHeaderCaseInsensitive(headers, "Anthropic-Ratelimit-Unified-Status")))
+	if unifiedStatus != "rejected" && status7dOI != "rejected" {
 		return false
 	}
 	return isOverageOrFableOnlyRejection(headers,
 		ClaudeUnifiedWindowStatus(headers, "5h"),
 		ClaudeUnifiedWindowStatus(headers, "7d"),
-		ClaudeUnifiedWindowStatus(headers, "7d_oi"))
+		status7dOI)
 }
 
 // ClaudeUnifiedWindowStatus returns the normalised Anthropic-Ratelimit-Unified-<window>-Status
