@@ -11,8 +11,6 @@ import (
 	"strings"
 	"time"
 
-	log "github.com/sirupsen/logrus"
-
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -179,6 +177,11 @@ func newClaudeFastDirectResponseError(resp *http.Response, body []byte) error {
 // logClaudeFableOnlyRejection records a Fable/overage-only 429 against the credential that
 // returned it. The rejection cools one model on one account and nothing else, so without this
 // line an exhausted Fable allowance leaves nothing in the log but a bare 429 access entry.
+//
+// Everything but the model is carried in the message text: logging.LogFormatter prints only the
+// keys on its logFieldOrder whitelist, and identity/quota detail is per-call diagnostics rather
+// than a display column worth adding to that shared list. conductor_execution.go does the same
+// with its auth_file=… identity strings.
 func logClaudeFableOnlyRejection(ctx context.Context, auth *cliproxyauth.Auth, model string, status int, headers http.Header) {
 	if status != http.StatusTooManyRequests || !helps.ClaudeHeadersIndicateFableOnlyRateLimitRejection(headers) {
 		return
@@ -190,18 +193,25 @@ func logClaudeFableOnlyRejection(ctx context.Context, auth *cliproxyauth.Auth, m
 		}
 	}
 	id, label, _, _ := claudeAuthLogIdentity(auth)
-	fields := log.Fields{
-		"auth_id":          id,
-		"auth_label":       label,
-		"model":            model,
-		"rejected_buckets": strings.Join(buckets, ","),
-		"retry_after":      headers.Get("Retry-After"),
-		"reset":            claudeFableResetForLog(headers),
-	}
+	authFile := ""
 	if auth != nil && auth.FileName != "" {
-		fields["auth_file"] = filepath.Base(auth.FileName)
+		// Only the basename: the full path leaks the host layout, and never any token material.
+		authFile = filepath.Base(auth.FileName)
 	}
-	helps.LogWithRequestID(ctx).WithFields(fields).Warn("claude 429: Fable/overage allowance exhausted on this credential; cooling this model and rotating credentials")
+	details := make([]string, 0, 6)
+	for _, detail := range [...][2]string{
+		{"auth_id", id},
+		{"auth_label", label},
+		{"auth_file", authFile},
+		{"rejected_buckets", strings.Join(buckets, ",")},
+		{"retry_after", strings.TrimSpace(headers.Get("Retry-After"))},
+		{"reset", claudeFableResetForLog(headers)},
+	} {
+		if detail[1] != "" {
+			details = append(details, detail[0]+"="+detail[1])
+		}
+	}
+	helps.LogWithRequestID(ctx).WithField("model", model).Warnf("claude 429: Fable/overage allowance exhausted on this credential; cooling this model and rotating credentials %s", strings.Join(details, " "))
 }
 
 func claudeFableResetForLog(headers http.Header) string {
