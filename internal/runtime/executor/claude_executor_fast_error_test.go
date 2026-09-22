@@ -24,14 +24,12 @@ func TestClaudeExecutorFastHTTPErrorPassesThroughWithoutRetry(t *testing.T) {
 		stream     bool
 		oauth      bool
 		compressed bool
-		betaOnly   bool
 	}{
 		{name: "non-stream OAuth bad request", status: http.StatusBadRequest, oauth: true},
 		{name: "stream OAuth unauthorized", status: http.StatusUnauthorized, stream: true, oauth: true},
 		{name: "non-stream API key forbidden", status: http.StatusForbidden},
 		{name: "stream OAuth credits refusal", status: http.StatusTooManyRequests, stream: true, oauth: true, compressed: true},
 		{name: "non-stream OAuth server error", status: http.StatusInternalServerError, oauth: true},
-		{name: "stream OAuth beta-only Fast refusal", status: http.StatusServiceUnavailable, stream: true, oauth: true, betaOnly: true},
 	}
 
 	for _, testCase := range testCases {
@@ -44,11 +42,8 @@ func TestClaudeExecutorFastHTTPErrorPassesThroughWithoutRetry(t *testing.T) {
 				if errRead != nil {
 					t.Fatal(errRead)
 				}
-				if !testCase.betaOnly && !bytes.Contains(requestBody, []byte(`"speed":"fast"`)) {
+				if !bytes.Contains(requestBody, []byte(`"speed":"fast"`)) {
 					t.Fatalf("upstream request does not contain speed=fast: %s", requestBody)
-				}
-				if testCase.betaOnly && bytes.Contains(requestBody, []byte(`"speed"`)) {
-					t.Fatalf("beta-only Fast request unexpectedly gained speed: %s", requestBody)
 				}
 				var wireBetas string
 				for name, values := range req.Header {
@@ -96,10 +91,6 @@ func TestClaudeExecutorFastHTTPErrorPassesThroughWithoutRetry(t *testing.T) {
 				Stream:         testCase.stream,
 				SourceFormat:   sdktranslator.FormatClaude,
 				ResponseFormat: sdktranslator.FormatClaude,
-			}
-			if testCase.betaOnly {
-				requestPayload = []byte(`{"model":"claude-opus-5","max_tokens":16,"messages":[{"role":"user","content":"reply OK"}]}`)
-				options.Headers = http.Header{"Anthropic-Beta": []string{claudeFastModeBeta}}
 			}
 			request := cliproxyexecutor.Request{Model: "claude-opus-5", Payload: requestPayload}
 

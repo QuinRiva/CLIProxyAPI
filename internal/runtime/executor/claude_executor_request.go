@@ -449,18 +449,24 @@ func claudeThinkingDisplaySet(body []byte) bool {
 	return display.Type == gjson.String && strings.TrimSpace(display.String()) != ""
 }
 
-// claudeRequestUsesFastMode reports whether the request selects the fast service
-// tier. Anthropic rejects the body's speed field with "Extra inputs are not
-// permitted" unless fast-mode-2026-02-01 is declared, so the beta has to follow
-// the body. Deriving it here rather than at the call sites is deliberate: the
-// streaming and non-streaming paths previously disagreed and streaming silently
-// dropped the beta, turning every fast request into a 400.
-func claudeRequestUsesFastMode(body []byte, requested map[string]bool) bool {
-	if requested[claudeFastModeBeta] {
-		return true
-	}
+// claudeRequestSpeedFast reports whether the request actually asks Anthropic for fast
+// serving. Only the body's speed field does that; declaring fast-mode-2026-02-01 merely
+// permits the field, and a caller that declares the beta without speed is served at the
+// standard tier. Every rule about how a fast request behaves keys on this, never on the
+// beta, or ordinary standard-tier traffic inherits the fast-mode error policy.
+func claudeRequestSpeedFast(body []byte) bool {
 	speed := gjson.GetBytes(body, "speed")
 	return speed.Type == gjson.String && strings.EqualFold(strings.TrimSpace(speed.String()), "fast")
+}
+
+// claudeRequestUsesFastMode reports whether fast-mode-2026-02-01 belongs on the wire.
+// Anthropic rejects the body's speed field with "Extra inputs are not permitted" unless the
+// beta is declared, so the beta has to follow the body; a caller that declared the beta keeps
+// it, because it may add speed itself. Deriving it here rather than at the call sites is
+// deliberate: the streaming and non-streaming paths previously disagreed and streaming
+// silently dropped the beta, turning every fast request into a 400.
+func claudeRequestUsesFastMode(body []byte, requested map[string]bool) bool {
+	return requested[claudeFastModeBeta] || claudeRequestSpeedFast(body)
 }
 
 // claudeCountTokensBetas is the fixed profile Claude Code 2.1.220 sends to
@@ -1148,7 +1154,7 @@ func applyClaudeHeadersWithNativeProfile(
 	if preserveCallerFingerprint {
 		// Caller-owned mode preserves both header and body-lifted betas verbatim.
 		// The explicit speed=fast request still needs its protocol beta.
-		if strings.EqualFold(strings.TrimSpace(gjson.GetBytes(body, "speed").String()), "fast") {
+		if claudeRequestSpeedFast(body) {
 			appendBeta(claudeFastModeBeta)
 		}
 		for _, beta := range extraBetas {
