@@ -14,10 +14,12 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
+	log "github.com/sirupsen/logrus"
 )
 
 // fableOnlyRejectionHeaders reproduces a capture from api.anthropic.com: the account's
@@ -137,6 +139,48 @@ func TestNewClaudeFastDirectResponseErrorScope(t *testing.T) {
 				t.Fatalf("IsCredentialScoped = %v, want %v", got, testCase.credentialScoped)
 			}
 		})
+	}
+}
+
+// TestLogClaudeFableOnlyRejectionRendersFacts pins the warning through the real log formatter.
+// That formatter prints only the fields on its logFieldOrder whitelist, so every fact except
+// model has to survive inside the message text or main.log records an unattributable warning.
+func TestLogClaudeFableOnlyRejectionRendersFacts(t *testing.T) {
+	logger := log.StandardLogger()
+	priorOut, priorFormatter, priorLevel := logger.Out, logger.Formatter, logger.GetLevel()
+	t.Cleanup(func() {
+		logger.SetOutput(priorOut)
+		logger.SetFormatter(priorFormatter)
+		logger.SetLevel(priorLevel)
+	})
+	var rendered bytes.Buffer
+	logger.SetOutput(&rendered)
+	logger.SetFormatter(&logging.LogFormatter{})
+	logger.SetLevel(log.WarnLevel)
+
+	logClaudeFableOnlyRejection(context.Background(), &cliproxyauth.Auth{
+		ID:       "cf0a4a1e-fable",
+		Label:    "carl-personal",
+		FileName: "/root/.cli-proxy-api/auths/claude-carl-personal.json",
+	}, "claude-fable-5-1", http.StatusTooManyRequests, fableOnlyRejectionHeaders())
+
+	line := strings.TrimRight(rendered.String(), "\n")
+	t.Logf("rendered: %s", line)
+	for _, want := range []string{
+		"auth_id=cf0a4a1e-fable",
+		"auth_label=carl-personal",
+		"auth_file=claude-carl-personal.json",
+		"rejected_buckets=7d_oi,overage",
+		"retry_after=17058",
+		"reset=2026-09-22T08:00:00Z",
+		"model=claude-fable-5-1",
+	} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("log line %q is missing %q", line, want)
+		}
+	}
+	if strings.Contains(line, "/root/") {
+		t.Fatalf("log line %q leaks the auth file path", line)
 	}
 }
 
