@@ -61,7 +61,7 @@ func ClaudeHeadersIndicateFableOnlyRateLimitRejection(headers http.Header) bool 
 	if unifiedStatus != "rejected" && status7dOI != "rejected" {
 		return false
 	}
-	return isOverageOrFableOnlyRejection(headers,
+	return isOverageOrFableOnlyRejection(headers, unifiedStatus,
 		ClaudeUnifiedWindowStatus(headers, "5h"),
 		ClaudeUnifiedWindowStatus(headers, "7d"),
 		status7dOI)
